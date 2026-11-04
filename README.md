@@ -107,9 +107,11 @@ docker logs -f gemini-tg-bot
 
 ### Перенос на другой ноут
 
+Репозиторий: <https://github.com/bulbosaur/gemini-tg-bot> (приватный, нужен вход в GitHub).
+
 ```bash
-git clone <адрес-вашего-репозитория>
-cd gemini_tg_bot
+git clone https://github.com/bulbosaur/gemini-tg-bot.git
+cd gemini-tg-bot
 cp .env.example .env      # вписать TELEGRAM_BOT_TOKEN и GEMINI_API_KEY
 docker compose up -d --build
 ```
