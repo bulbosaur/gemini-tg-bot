@@ -1,0 +1,23 @@
+# Образ Telegram-бота с Gemini: python:3.12-slim + aiogram + google-genai
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Зависимости отдельным слоем: код меняется чаще, чем requirements.txt
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY bot.py config.py gemini_service.py storage.py formatting.py ./
+
+# Бот работает от непривилегированного пользователя
+RUN useradd --create-home --uid 10001 botuser \
+    && chown -R botuser:botuser /app
+USER botuser
+
+# Ключи передаются снаружи: --env-file .env или env_file в docker-compose.yml
+CMD ["python", "-u", "bot.py"]

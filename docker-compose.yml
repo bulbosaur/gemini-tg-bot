@@ -1,0 +1,15 @@
+services:
+  bot:
+    build: .
+    image: gemini-tg-bot:latest
+    container_name: gemini-tg-bot
+    # TELEGRAM_BOT_TOKEN, GEMINI_API_KEY и остальные настройки берутся из .env
+    env_file:
+      - .env
+    restart: unless-stopped
+    # Логи видны в `docker compose logs -f`, файлы боту не нужны
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
