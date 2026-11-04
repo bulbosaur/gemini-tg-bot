@@ -11,6 +11,10 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
+# Gemini принимает вложение инлайном (без Files API) до 20 МБ на весь запрос;
+# держим запас, чтобы вместе с историей диалога не упереться в лимит.
+MAX_INLINE_BYTES = 18 * 1024 * 1024
+
 # Причины, по которым Gemini вернул пустой ответ.
 BLOCKED_FINISH_REASONS = {
     "SAFETY",
@@ -27,9 +31,37 @@ BLOCKED_REPLY = (
 )
 EMPTY_REPLY = (
     "🤔 Gemini вернул пустой ответ. Попробуйте задать вопрос иначе "
-    "или приложить другое изображение."
+    "или приложить другой файл."
 )
+
 DEFAULT_IMAGE_PROMPT = "Опиши это изображение и выдели главное."
+DEFAULT_PDF_PROMPT = (
+    "Проанализируй документ: кратко перескажи содержание, затем выдели ключевые пункты."
+)
+DEFAULT_TEXT_PROMPT = "Прочитай этот файл и кратко перескажи содержание."
+
+
+@dataclass(slots=True)
+class Attachment:
+    """Вложение к запросу: фото или файл (PDF, txt)."""
+
+    data: bytes
+    mime_type: str
+    file_name: str | None = None
+
+    @property
+    def default_prompt(self) -> str:
+        if self.mime_type.startswith("image/"):
+            return DEFAULT_IMAGE_PROMPT
+        if self.mime_type == "application/pdf":
+            return DEFAULT_PDF_PROMPT
+        return DEFAULT_TEXT_PROMPT
+
+    @property
+    def label(self) -> str:
+        if self.file_name:
+            return f"Файл: {self.file_name}"
+        return "Изображение" if self.mime_type.startswith("image/") else "Документ"
 
 
 @dataclass(slots=True)
@@ -72,25 +104,33 @@ class GeminiService:
         history: Sequence[types.Content],
         *,
         prompt: str = "",
-        image: tuple[bytes, str] | None = None,
+        attachment: Attachment | None = None,
     ) -> GeminiReply:
-        """Отправить реплику (текст и/или изображение) и вернуть ответ модели."""
+        """Отправить реплику (текст и/или файл) и вернуть ответ модели."""
+        contents = _fit_inline_limit(history, attachment)
+
         parts: list[types.Part] = []
+        if attachment is not None and attachment.file_name:
+            parts.append(types.Part(text=attachment.label))
+
         cleaned_prompt = prompt.strip()
         if cleaned_prompt:
             parts.append(types.Part(text=cleaned_prompt))
-        if image is not None:
-            data, mime_type = image
-            parts.append(types.Part.from_bytes(data=data, mime_type=mime_type))
+        elif attachment is not None:
+            parts.append(types.Part(text=attachment.default_prompt))
+
+        if attachment is not None:
+            parts.append(
+                types.Part.from_bytes(data=attachment.data, mime_type=attachment.mime_type)
+            )
+
         if not parts:
-            parts.append(types.Part(text=DEFAULT_IMAGE_PROMPT))
+            parts.append(types.Part(text="Привет! Чем можешь помочь?"))
 
         user_content = types.Content(role="user", parts=parts)
-        contents = [*history, user_content]
-
         response = await self._client.aio.models.generate_content(
             model=self._model,
-            contents=contents,
+            contents=[*contents, user_content],
             config=self._config,
         )
 
@@ -117,6 +157,50 @@ class GeminiService:
             await close()
         except Exception:  # pragma: no cover - best effort при остановке
             logger.debug("Не удалось закрыть клиент Gemini", exc_info=True)
+
+
+def _inline_bytes(contents: Sequence[types.Content], extra: int = 0) -> int:
+    total = extra
+    for content in contents:
+        for part in content.parts or []:
+            inline = getattr(part, "inline_data", None)
+            data = getattr(inline, "data", None)
+            if data:
+                total += len(data)
+    return total
+
+
+def _fit_inline_limit(
+    history: Sequence[types.Content],
+    attachment: Attachment | None,
+) -> list[types.Content]:
+    """Уложиться в лимит инлайн-вложений: старые файлы заменяем пометкой.
+
+    История хранится в памяти, и суммарно вложения могут превысить лимит
+    Gemini. Тогда самые старые вложения выпадают из запроса — текст диалога
+    при этом сохраняется.
+    """
+    contents = [*history]
+    extra = len(attachment.data) if attachment is not None else 0
+    if _inline_bytes(contents, extra) <= MAX_INLINE_BYTES:
+        return contents
+
+    for index, content in enumerate(contents):
+        if _inline_bytes(contents, extra) <= MAX_INLINE_BYTES:
+            break
+        new_parts: list[types.Part] = []
+        dropped = False
+        for part in content.parts or []:
+            if getattr(part, "inline_data", None) is not None:
+                new_parts.append(types.Part(text="[вложение больше не прикладывается]"))
+                dropped = True
+            else:
+                new_parts.append(part)
+        if dropped:
+            contents[index] = types.Content(role=content.role, parts=new_parts)
+            logger.info("Вложение из истории не отправлено: превышен лимит запроса")
+
+    return contents
 
 
 def _extract_text(response: types.GenerateContentResponse) -> str:

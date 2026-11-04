@@ -64,6 +64,7 @@ class Config:
     gemini_model: str = DEFAULT_MODEL
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     history_limit: int = 20
+    history_media_mb: float = 15.0
     request_timeout: float = 120.0
 
     @classmethod
@@ -92,5 +93,6 @@ class Config:
             gemini_model=_env_str("GEMINI_MODEL", DEFAULT_MODEL),
             system_prompt=_env_str("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
             history_limit=max(2, _env_int("HISTORY_LIMIT", 20)),
+            history_media_mb=max(0.0, _env_float("HISTORY_MEDIA_MB", 15.0)),
             request_timeout=max(10.0, _env_float("REQUEST_TIMEOUT", 120.0)),
         )
