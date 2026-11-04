@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 
+from mathfmt import latex_to_text
+
 MAX_MESSAGE_LENGTH = 4096  # жёсткий лимит Telegram на одно сообщение
 CHUNK_LIMIT = 3800  # запас на незакрытые теги и служебную разметку
 
@@ -104,7 +106,8 @@ def _render_code_block(language: str, code: str) -> str:
 
 def _render_text_block(block: str) -> str:
     """Построчная обработка обычного текста (без блоков кода)."""
-    block = _escape(block.strip("\n"))
+    block = latex_to_text(block.strip("\n"))
+    block = _escape(block)
     if not block.strip():
         return ""
 

@@ -12,7 +12,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py config.py gemini_service.py storage.py formatting.py ./
+COPY bot.py config.py gemini_service.py storage.py formatting.py mathfmt.py ./
 
 # Бот работает от непривилегированного пользователя
 RUN useradd --create-home --uid 10001 botuser \
