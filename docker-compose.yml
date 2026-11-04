@@ -7,9 +7,15 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    volumes:
+      # Белый список доступа переживает пересборку контейнера
+      - bot_data:/app/data
     # Логи видны в `docker compose logs -f`, файлы боту не нужны
     logging:
       driver: json-file
       options:
         max-size: "5m"
         max-file: "3"
+
+volumes:
+  bot_data:

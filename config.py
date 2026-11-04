@@ -57,6 +57,23 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_ids(name: str) -> tuple[int, ...]:
+    """Список Telegram ID через запятую или пробел: "111, 222"."""
+    raw = _env_str(name)
+    if not raw:
+        return ()
+    identifiers: list[int] = []
+    for chunk in raw.replace(";", ",").replace(" ", ",").split(","):
+        chunk = chunk.strip().lstrip("@")
+        if not chunk:
+            continue
+        try:
+            identifiers.append(int(chunk))
+        except ValueError:
+            continue
+    return tuple(dict.fromkeys(identifiers))
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Настройки бота, собранные из окружения."""
@@ -68,6 +85,9 @@ class Config:
     history_limit: int = 20
     history_media_mb: float = 15.0
     request_timeout: float = 120.0
+    admin_ids: tuple[int, ...] = ()
+    allowed_seed: tuple[int, ...] = ()
+    access_file: Path = PROJECT_DIR / "data" / "access.json"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -97,4 +117,9 @@ class Config:
             history_limit=max(2, _env_int("HISTORY_LIMIT", 20)),
             history_media_mb=max(0.0, _env_float("HISTORY_MEDIA_MB", 15.0)),
             request_timeout=max(10.0, _env_float("REQUEST_TIMEOUT", 120.0)),
+            admin_ids=_env_ids("ADMIN_IDS"),
+            allowed_seed=_env_ids("ALLOWED_USER_IDS"),
+            access_file=Path(
+                _env_str("ACCESS_FILE", str(PROJECT_DIR / "data" / "access.json"))
+            ),
         )

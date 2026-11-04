@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 # Интерпретатор может работать с безопасным sys.path (флаг -P / PYTHONSAFEPATH),
@@ -19,14 +21,22 @@ PROJECT_DIR = Path(__file__).resolve().parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Document, LinkPreviewOptions, Message
+from aiogram.types import (
+    CallbackQuery,
+    Document,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    Message,
+)
 from aiogram.utils.chat_action import ChatActionSender
 
+from access import AccessList
 from config import Config, ConfigError
 from formatting import render_chunks, strip_tags
 from gemini_service import Attachment, GeminiService
@@ -79,6 +89,24 @@ TOO_BIG_TEXT = (
     "Пришлите версию поменьше или разбейте документ на части."
 )
 
+ACCESS_REQUEST_TEXT = (
+    "🔒 Доступ к боту — по заявке.\n\n"
+    "Ваш Telegram ID: <code>{user_id}</code>\n"
+    "Передайте его администратору: после разрешения бот заработает."
+)
+ACCESS_BLOCKED_TEXT = "⛔ Администратор закрыл вам доступ к боту."
+ACCESS_GRANTED_TEXT = "✅ Доступ открыт! Напишите /start — и можно спрашивать."
+ACCESS_DENIED_TEXT = "⛔ Заявка на доступ отклонена администратором."
+ADMIN_ONLY_TEXT = "Эта команда доступна только администратору."
+ALLOW_USAGE = (
+    "Использование: <code>/allow 123456789</code>\n"
+    "Можно сразу с именем: <code>/allow 123456789 Аня</code>"
+)
+DENY_USAGE = "Использование: <code>/deny 123456789</code>"
+
+# Заявки, отправленные админам: user_id -> имя (чтобы подписать после «Разрешить»)
+_PENDING_USERS: dict[int, str] = {}
+
 UNKNOWN_COMMAND_TEXT = "🤷 Не знаю такой команды. Доступно: /help и /clear."
 
 ERROR_TEXT = "⚠️ Не получилось получить ответ от Gemini. Попробуйте ещё раз чуть позже."
@@ -112,6 +140,130 @@ async def cmd_clear(message: Message, memory: DialogueMemory) -> None:
 
 async def handle_unknown_command(message: Message) -> None:
     await message.answer(UNKNOWN_COMMAND_TEXT)
+
+
+async def cmd_allow(message: Message, access: AccessList, admin_ids: set[int]) -> None:
+    if not _is_admin(message, admin_ids):
+        await message.answer(ADMIN_ONLY_TEXT)
+        return
+    target = _parse_target(message)
+    if target is None:
+        await message.answer(ALLOW_USAGE)
+        return
+
+    user_id, name = target
+    access.allow(user_id, name)
+    access.save()
+    suffix = f" — {html.escape(name)}" if name else ""
+    await message.answer(f"✅ Доступ открыт: <code>{user_id}</code>{suffix}")
+    try:
+        await message.bot.send_message(user_id, ACCESS_GRANTED_TEXT)
+    except Exception:
+        logger.info("Пользователь %s ещё не писал боту, уведомление не доставлено", user_id)
+
+
+async def cmd_deny(message: Message, access: AccessList, admin_ids: set[int]) -> None:
+    if not _is_admin(message, admin_ids):
+        await message.answer(ADMIN_ONLY_TEXT)
+        return
+    target = _parse_target(message)
+    if target is None:
+        await message.answer(DENY_USAGE)
+        return
+
+    user_id, _ = target
+    access.block(user_id)
+    access.save()
+    await message.answer(f"⛔ Доступ закрыт: <code>{user_id}</code>")
+
+
+async def cmd_users(message: Message, access: AccessList, admin_ids: set[int]) -> None:
+    if not _is_admin(message, admin_ids):
+        await message.answer(ADMIN_ONLY_TEXT)
+        return
+
+    lines = ["<b>Доступ к боту</b>", ""]
+    if admin_ids:
+        admins = ", ".join(f"<code>{user_id}</code>" for user_id in sorted(admin_ids))
+        lines.append(f"Админы: {admins}")
+
+    allowed = access.items()
+    if allowed:
+        lines.append("Разрешены:")
+        for user_id, name in allowed:
+            suffix = f" — {html.escape(name)}" if name else ""
+            lines.append(f"• <code>{user_id}</code>{suffix}")
+    else:
+        lines.append("Белый список пуст: доступ только у админов.")
+
+    if access.blocked:
+        blocked = ", ".join(f"<code>{user_id}</code>" for user_id in sorted(access.blocked))
+        lines.extend(["", f"Заблокированы: {blocked}"])
+
+    await message.answer("\n".join(lines), link_preview_options=NO_PREVIEW)
+
+
+async def on_access_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+    access: AccessList,
+    admin_ids: set[int],
+) -> None:
+    if callback.from_user.id not in admin_ids:
+        await callback.answer(ADMIN_ONLY_TEXT, show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or parts[1] not in {"allow", "deny"}:
+        await callback.answer()
+        return
+    try:
+        user_id = int(parts[2])
+    except ValueError:
+        await callback.answer()
+        return
+
+    name = _PENDING_USERS.pop(user_id, "")
+    suffix = f" — {html.escape(name)}" if name else ""
+    if parts[1] == "allow":
+        access.allow(user_id, name)
+        access.save()
+        await callback.answer("Доступ открыт")
+        text = f"✅ Доступ открыт: <code>{user_id}</code>{suffix}"
+        notice = ACCESS_GRANTED_TEXT
+    else:
+        access.block(user_id)
+        access.save()
+        await callback.answer("Пользователь заблокирован")
+        text = f"⛔ Доступ закрыт: <code>{user_id}</code>{suffix}"
+        notice = ACCESS_DENIED_TEXT
+
+    edit = getattr(callback.message, "edit_text", None)
+    if edit is not None:
+        try:
+            await edit(text)
+        except TelegramBadRequest:
+            logger.debug("Не удалось изменить сообщение заявки", exc_info=True)
+
+    try:
+        await bot.send_message(user_id, notice)
+    except Exception:
+        logger.info("Не удалось уведомить пользователя %s", user_id)
+
+
+def _is_admin(message: Message, admin_ids: set[int]) -> bool:
+    return bool(message.from_user) and message.from_user.id in admin_ids
+
+
+def _parse_target(message: Message) -> tuple[int, str] | None:
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        return None
+    raw = parts[1].strip().lstrip("@")
+    if not raw.isdigit():
+        return None
+    name = parts[2].strip() if len(parts) > 2 else ""
+    return int(raw), name
 
 
 async def handle_text(
@@ -278,6 +430,78 @@ async def _safe_answer(message: Message, text: str) -> None:
         logger.exception("Не удалось отправить сообщение об ошибке")
 
 
+class AccessMiddleware(BaseMiddleware):
+    """Пускает к боту только админов и пользователей из белого списка."""
+
+    def __init__(
+        self,
+        access: AccessList,
+        admin_ids: set[int],
+        cooldown: float = 600.0,
+    ) -> None:
+        self._access = access
+        self._admin_ids = admin_ids
+        self._cooldown = cooldown
+        self._notified_at: dict[int, float] = {}
+
+    async def __call__(self, handler, event, data):  # noqa: ANN001 - сигнатура aiogram
+        user = getattr(event, "from_user", None)
+        if user is None:
+            return await handler(event, data)
+
+        text = (getattr(event, "text", None) or "").strip()
+        if text.startswith("/whoami"):
+            await _safe_answer(event, f"Ваш Telegram ID: <code>{user.id}</code>")
+            return None
+
+        if user.id in self._admin_ids or self._access.is_allowed(user.id):
+            return await handler(event, data)
+
+        if self._access.is_blocked(user.id):
+            await _safe_answer(event, ACCESS_BLOCKED_TEXT)
+            return None
+
+        await self._notify_admins(event, user, data.get("bot"))
+        await _safe_answer(event, ACCESS_REQUEST_TEXT.format(user_id=user.id))
+        return None
+
+    async def _notify_admins(self, message: Message, user, bot) -> None:
+        now = time.monotonic()
+        last = self._notified_at.get(user.id)
+        if last is not None and now - last < self._cooldown:
+            return
+        self._notified_at[user.id] = now
+        if bot is None:
+            return
+
+        name = user.full_name or str(user.id)
+        _PENDING_USERS[user.id] = name
+        username = f"@{user.username}" if user.username else "—"
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Разрешить", callback_data=f"access:allow:{user.id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="⛔ Заблокировать", callback_data=f"access:deny:{user.id}"
+                    ),
+                ]
+            ]
+        )
+        text = (
+            "🔔 <b>Заявка на доступ</b>\n\n"
+            f"Имя: {html.escape(name)}\n"
+            f"Username: {username}\n"
+            f"ID: <code>{user.id}</code>"
+        )
+        for admin_id in sorted(self._admin_ids):
+            try:
+                await bot.send_message(admin_id, text, reply_markup=keyboard)
+            except Exception:
+                logger.warning("Заявка не ушла админу %s", admin_id, exc_info=True)
+
+
 def _attachment_kind(attachment: Attachment | None) -> str:
     if attachment is None:
         return "текст"
@@ -337,22 +561,45 @@ async def main() -> None:
         timeout=config.request_timeout,
     )
 
+    access = AccessList.load(config.access_file, config.allowed_seed)
+    admin_ids = set(config.admin_ids)
+    if not admin_ids:
+        logger.warning(
+            "ADMIN_IDS не задан: фильтр доступа выключен, бот открыт для всех. "
+            "Узнать свой ID можно командой /whoami"
+        )
+
     dispatcher = Dispatcher()
     # Значения из workflow_data aiogram подставит в аргументы хендлеров по имени.
     dispatcher["service"] = service
     dispatcher["memory"] = memory
+    dispatcher["access"] = access
+    dispatcher["admin_ids"] = admin_ids
+
+    if admin_ids:
+        dispatcher.message.outer_middleware(AccessMiddleware(access, admin_ids))
+
     dispatcher.message.register(cmd_start, CommandStart())
     dispatcher.message.register(cmd_help, Command("help"))
     dispatcher.message.register(cmd_clear, Command("clear"))
+    dispatcher.message.register(cmd_allow, Command("allow"))
+    dispatcher.message.register(cmd_deny, Command("deny"))
+    dispatcher.message.register(cmd_users, Command("users"))
     dispatcher.message.register(handle_unknown_command, F.text.startswith("/"))
     dispatcher.message.register(handle_photo, F.photo)
     dispatcher.message.register(handle_document, F.document)
     dispatcher.message.register(handle_text, F.text)
     dispatcher.message.register(handle_other)
+    dispatcher.callback_query.register(on_access_callback, F.data.startswith("access:"))
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Бот запущен. Модель: %s", config.gemini_model)
+        logger.info(
+            "Бот запущен. Модель: %s. Админы: %s, в белом списке: %s",
+            config.gemini_model,
+            sorted(admin_ids) or "—",
+            len(access.allowed),
+        )
         await dispatcher.start_polling(
             bot,
             allowed_updates=dispatcher.resolve_used_update_types(),
