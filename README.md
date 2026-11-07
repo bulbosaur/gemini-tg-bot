@@ -112,16 +112,21 @@ docker logs -f gemini-tg-bot
 Ключи внутрь образа **не записываются** — они передаются в контейнер при запуске
 (`--env-file` / `env_file`), поэтому один и тот же образ можно поднимать на любом ноуте.
 
-### Перенос на другой ноут
+### Перенос на другой сервер
 
-Репозиторий: <https://github.com/bulbosaur/gemini-tg-bot> (приватный, нужен вход в GitHub).
+Репозиторий: <https://github.com/bulbosaur/gemini-tg-bot>
 
 ```bash
 git clone https://github.com/bulbosaur/gemini-tg-bot.git
 cd gemini-tg-bot
-cp .env.example .env      # вписать TELEGRAM_BOT_TOKEN и GEMINI_API_KEY
+cp .env.example .env      # вписать свои TELEGRAM_BOT_TOKEN, GEMINI_API_KEY и ADMIN_IDS
 docker compose up -d --build
 ```
+
+**Важно, если запускаете у себя копию бота:** свой токен и свой ключ. Токен — это
+конкретный бот: два процесса с одним токеном будут драться за сообщения
+(`409 Conflict`). Сделайте своего бота у [@BotFather](https://t.me/BotFather) и
+получите свой ключ в AI Studio; `ADMIN_IDS` — свой Telegram ID (узнать: `/whoami`).
 
 Профиль Telegram-бота один: если тот же токен уже запущен где-то ещё (в том числе
 `python bot.py` на старом ноуте), новый экземпляр получит `409 Conflict` — сначала
